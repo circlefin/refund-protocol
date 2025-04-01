@@ -24,11 +24,8 @@ on:
 
 permissions: read-all
 
-env:
-  FOUNDRY_PROFILE: ci
-
 jobs:
-  run_refund_tests:
+  run_refund_tests_and_lint:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository code
@@ -43,6 +40,11 @@ jobs:
         with:
           version: nightly
 
+      - name: Make sure code is formatted
+        run: |
+          forge fmt --check
+        id: format_check
+
       - name: Run Forge build
         run: |
           forge --version
@@ -53,3 +55,13 @@ jobs:
         run: |
           forge test -vvv
         id: test
+
+  scan:
+    if: github.event_name == 'pull_request'
+    uses: circlefin/circle-public-github-workflows/.github/workflows/pr-scan.yaml@v1
+
+  release-sbom:
+    if: github.event_name == 'push'
+    uses: circlefin/circle-public-github-workflows/.github/workflows/attach-release-assets.yaml@v1
+    permissions:
+      contents: write
