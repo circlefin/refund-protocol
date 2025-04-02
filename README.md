@@ -1,10 +1,23 @@
 ## Refund Protocol
 
-This repo contains the contract for the Refund Protocol.
+A protocol for handling refunds and chargebacks in a non-custodial manner. This protocol introduces an arbiter system that can mediate disputes between payment senders and receivers, providing a better user experience to stablecoin payments while still allowing receivers to retain control over their funds.
 
-It is an example contract for enabling refunds and/or chargebacks using a non-custodial arbiter.
+## Setup
 
-## Usage
+### Prerequisites
+
+1. Install Foundry:
+```shell
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+```
+
+2. Initialize submodules:
+```shell
+git submodule update --init --recursive
+```
+
+## Development
 
 ### Build
 
@@ -23,3 +36,7 @@ $ forge test
 ```shell
 $ forge fmt
 ```
+
+## License
+
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
