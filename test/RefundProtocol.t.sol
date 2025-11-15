@@ -49,10 +49,17 @@ contract RefundProtocolTest is Test {
         usdc.approve(address(refundProtocol), 1000);
         vm.prank(arbiter);
         usdc.approve(address(refundProtocol), 1000);
+        vm.prank(receiver);
+        usdc.approve(address(refundProtocol), 1000);
     }
 
     function testPay() public {
-        vm.startPrank(user);
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 1);
+
+        assertEq(refundProtocol.lockupSeconds(receiver), 1);
+
+        vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
         (address to, uint256 amount,, address refundAddr,,) = refundProtocol.payments(0);
@@ -63,17 +70,15 @@ contract RefundProtocolTest is Test {
     }
 
     function testPayRefundToIsZeroAddress() public {
-        vm.startPrank(user);
+        vm.prank(user);
         vm.expectRevert(RefundProtocol.RefundToIsZeroAddress.selector);
         refundProtocol.pay(receiver, 100, address(0));
     }
 
-    function testSetLockupSeconds() public {
-        vm.prank(arbiter);
-        refundProtocol.setLockupSeconds(receiver, 1);
-        vm.stopPrank();
-
-        assertEq(refundProtocol.lockupSeconds(receiver), 1);
+    function testPayLockupSecondsIsZero() public {
+        vm.prank(user);
+        vm.expectRevert(RefundProtocol.LockupSecondsIsZero.selector);
+        refundProtocol.pay(receiver, 100, refundTo);
     }
 
     function testSetLockupSecondsExceedsMax() public {
@@ -89,32 +94,17 @@ contract RefundProtocolTest is Test {
         refundProtocol.setLockupSeconds(receiver, 1);
     }
 
-    function testWithdrawWithoutLockup() public {
+    function testWithdraw() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
         uint256[] memory paymentIDs = new uint256[](1);
         paymentIDs[0] = 0;
 
-        vm.prank(receiver);
-        refundProtocol.withdraw(paymentIDs);
-        vm.assertEq(refundProtocol.balances(receiver), 0);
-        vm.assertEq(usdc.balanceOf(receiver), 100);
-    }
-
-    function testWithdrawWithSetLockup() public {
-        vm.prank(arbiter);
-        refundProtocol.setLockupSeconds(receiver, 3600);
-
-        vm.startPrank(user);
-        refundProtocol.pay(receiver, 100, refundTo);
-
-        vm.stopPrank();
         vm.startPrank(receiver);
-
-        uint256[] memory paymentIDs = new uint256[](1);
-        paymentIDs[0] = 0;
-
         vm.expectRevert(abi.encodeWithSelector(RefundProtocol.PaymentIsStillLocked.selector, 0));
         refundProtocol.withdraw(paymentIDs);
 
@@ -122,6 +112,7 @@ contract RefundProtocolTest is Test {
         refundProtocol.withdraw(paymentIDs);
         vm.assertEq(refundProtocol.balances(receiver), 0);
         vm.assertEq(usdc.balanceOf(receiver), 100);
+        vm.stopPrank();
     }
 
     function testWithdrawAfterPartialEarlyWithdrawal() public {
@@ -211,7 +202,66 @@ contract RefundProtocolTest is Test {
         refundProtocol.withdraw(withdrawPaymentIDs);
     }
 
+    function testWithdrawAfterDepositRecipientFunds() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+        uint256[] memory withdrawalAmounts = new uint256[](1);
+        withdrawalAmounts[0] = 100;
+        uint256 feeAmount = 0;
+
+        (uint8 v, bytes32 r, bytes32 s) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiverPrivateKey);
+
+        vm.startPrank(arbiter);
+        refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v, r, s);
+        refundProtocol.depositArbiterFunds(100);
+        refundProtocol.refundByArbiter(0);
+        vm.stopPrank();
+
+        vm.assertEq(refundProtocol.debts(receiver), 100);
+
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        vm.assertEq(refundProtocol.debts(receiver), 100);
+        vm.assertEq(refundProtocol.balances(receiver), 100);
+
+        usdc.mint(receiver, 100);
+        vm.prank(receiver);
+        refundProtocol.depositRecipientFunds(100);
+
+        vm.assertEq(refundProtocol.debts(receiver), 0);
+        vm.assertEq(refundProtocol.balances(receiver), 100);
+
+        uint256[] memory withdrawPaymentIDs = new uint256[](1);
+        withdrawPaymentIDs[0] = 1;
+
+        vm.warp(block.timestamp + 3600); // Advance time to a valid timestamp
+        vm.prank(receiver);
+        refundProtocol.withdraw(withdrawPaymentIDs);
+        vm.assertEq(refundProtocol.balances(receiver), 0);
+        vm.assertEq(usdc.balanceOf(receiver), 200);
+    }
+
+    function testDepositRecipientFunds() public {
+        usdc.mint(receiver, 1000);
+        vm.prank(receiver);
+        refundProtocol.depositRecipientFunds(100);
+
+        vm.assertEq(refundProtocol.debts(receiver), 0);
+        vm.assertEq(refundProtocol.balances(receiver), 100); 
+    }
+
     function testUnauthorizedWithdraw() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -227,19 +277,17 @@ contract RefundProtocolTest is Test {
         assertEq(refundProtocol.balances(arbiter), 0);
         assertEq(usdc.balanceOf(address(refundProtocol)), 0);
 
-        vm.startPrank(arbiter);
+        vm.prank(arbiter);
         refundProtocol.depositArbiterFunds(100);
-        vm.stopPrank();
 
         assertEq(refundProtocol.balances(arbiter), 100);
         assertEq(usdc.balanceOf(address(refundProtocol)), 100);
     }
 
     function testDepositArbiterFundsUnauthorized() public {
-        vm.startPrank(user);
+        vm.prank(user);
         vm.expectRevert(RefundProtocol.CallerNotAllowed.selector);
         refundProtocol.depositArbiterFunds(100);
-        vm.stopPrank();
     }
 
     function testWithdrawArbiterFunds() public {
@@ -248,13 +296,12 @@ contract RefundProtocolTest is Test {
 
         vm.startPrank(arbiter);
         refundProtocol.depositArbiterFunds(100);
-        vm.stopPrank();
 
         assertEq(refundProtocol.balances(arbiter), 100);
         assertEq(usdc.balanceOf(address(refundProtocol)), 100);
 
-        vm.startPrank(arbiter);
         refundProtocol.withdrawArbiterFunds(10);
+        vm.stopPrank();
 
         assertEq(refundProtocol.balances(arbiter), 90);
         assertEq(usdc.balanceOf(address(refundProtocol)), 90);
@@ -262,10 +309,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testWithdrawArbiterFundsUnauthorized() public {
-        vm.startPrank(user);
+        vm.prank(user);
         vm.expectRevert(RefundProtocol.CallerNotAllowed.selector);
         refundProtocol.withdrawArbiterFunds(100);
-        vm.stopPrank();
     }
 
     function testEarlyWithdrawByArbiter() public {
@@ -433,12 +479,12 @@ contract RefundProtocolTest is Test {
         (uint8 v, bytes32 r, bytes32 s) =
             _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiverPrivateKey);
 
-        vm.prank(arbiter);
+        vm.startPrank(arbiter);
         refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v, r, s);
 
-        vm.prank(arbiter);
         vm.expectRevert(RefundProtocol.WithdrawalHashAlreadyUsed.selector);
         refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v, r, s);
+        vm.stopPrank();
     }
 
     function testEarlyWithdrawByArbiterAfterRefund() public {
@@ -466,6 +512,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testEarlyWithdrawByArbiterExpired() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -486,6 +535,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testEarlyWithdrawByArbiterPaymentDoesNotBelongToRecipient() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -531,11 +583,79 @@ contract RefundProtocolTest is Test {
 
         vm.prank(user);
         vm.expectRevert(RefundProtocol.CallerNotAllowed.selector);
-
         refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v, r, s);
     }
 
+    function testEarlyWithdrawByArbiterTwice() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+        uint256[] memory withdrawalAmounts1 = new uint256[](1);
+        withdrawalAmounts1[0] = 60;
+        uint256 feeAmount = 0;
+
+        (uint8 v1, bytes32 r1, bytes32 s1) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts1, feeAmount, expiry, 0, receiverPrivateKey);
+
+        vm.startPrank(arbiter);
+        refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts1, feeAmount, expiry, 0, receiver, v1, r1, s1);
+
+        assertEq(refundProtocol.balances(receiver), 40);
+        assertEq(usdc.balanceOf(receiver), 60);
+
+        uint256[] memory withdrawalAmounts2 = new uint256[](1);
+        withdrawalAmounts2[0] = 40; // remaining amount
+
+        (uint8 v2, bytes32 r2, bytes32 s2) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts2, feeAmount, expiry, 0, receiverPrivateKey);
+
+        refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts2, feeAmount, expiry, 0, receiver, v2, r2, s2);
+        vm.stopPrank();
+
+        assertEq(refundProtocol.balances(receiver), 0);
+        assertEq(usdc.balanceOf(receiver), 100);
+        assertEq(usdc.balanceOf(address(refundProtocol)), 0);
+    }
+
+    function testEarlyWithdrawByArbiterTwiceInvalidWithdrawalAmount() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+        uint256[] memory withdrawalAmounts1 = new uint256[](1);
+        withdrawalAmounts1[0] = 60;
+        uint256 feeAmount = 0;
+
+        (uint8 v1, bytes32 r1, bytes32 s1) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts1, feeAmount, expiry, 0, receiverPrivateKey);
+
+        vm.startPrank(arbiter);
+        refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts1, feeAmount, expiry, 0, receiver, v1, r1, s1);
+
+        uint256[] memory withdrawalAmounts2 = new uint256[](1);
+        withdrawalAmounts2[0] = 50; // too much
+
+        (uint8 v2, bytes32 r2, bytes32 s2) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts2, feeAmount, expiry, 0, receiverPrivateKey);
+
+        vm.expectRevert(abi.encodeWithSelector(RefundProtocol.InvalidWithdrawalAmount.selector, 0, 50));
+        refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts2, feeAmount, expiry, 0, receiver, v2, r2, s2);
+        vm.stopPrank();
+    }
+
     function testUpdateRefundTo() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -547,6 +667,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testUpdateRefundToZeroAddress() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -556,6 +679,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testUpdateRefundToUnauthorized() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -565,6 +691,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testRefundByRecipient() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -577,6 +706,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testRefundByRecipientUnauthorized() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -586,6 +718,9 @@ contract RefundProtocolTest is Test {
     }
 
     function testRefundByArbiter() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+        
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
@@ -598,11 +733,16 @@ contract RefundProtocolTest is Test {
     }
 
     function testRefundByArbiterWhenArbiterFundsAreUsed() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
         uint256[] memory paymentIDs = new uint256[](1);
         paymentIDs[0] = 0;
+
+        vm.warp(block.timestamp + 3600); // Advance time to a valid timestamp
 
         vm.prank(receiver);
         refundProtocol.withdraw(paymentIDs);
@@ -611,6 +751,7 @@ contract RefundProtocolTest is Test {
         refundProtocol.depositArbiterFunds(100);
 
         refundProtocol.refundByArbiter(0);
+        vm.stopPrank();
 
         assertEq(usdc.balanceOf(refundTo), 100);
         assertEq(usdc.balanceOf(address(refundProtocol)), 0);
@@ -620,20 +761,28 @@ contract RefundProtocolTest is Test {
     }
 
     function testRefundByArbiterUnauthorized() public {
-        vm.prank(user);
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.startPrank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
-        vm.prank(user);
         vm.expectRevert(RefundProtocol.CallerNotAllowed.selector);
         refundProtocol.refundByArbiter(0);
+        vm.stopPrank();
     }
 
     function testSettleDebt() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
         uint256[] memory paymentIDs = new uint256[](1);
         paymentIDs[0] = 0;
+
+        vm.warp(block.timestamp + 3600); // Advance time to a valid timestamp
 
         vm.prank(receiver);
         refundProtocol.withdraw(paymentIDs);
@@ -646,7 +795,7 @@ contract RefundProtocolTest is Test {
 
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
-        vm.startPrank(arbiter);
+        vm.prank(arbiter);
         refundProtocol.settleDebt(receiver);
 
         assertEq(usdc.balanceOf(address(refundProtocol)), 100);
@@ -656,11 +805,16 @@ contract RefundProtocolTest is Test {
     }
 
     function testSettleDebtPartially() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
         vm.prank(user);
         refundProtocol.pay(receiver, 100, refundTo);
 
         uint256[] memory paymentIDs = new uint256[](1);
         paymentIDs[0] = 0;
+
+        vm.warp(block.timestamp + 3600); // Advance time to a valid timestamp
 
         vm.prank(receiver);
         refundProtocol.withdraw(paymentIDs);
@@ -673,7 +827,7 @@ contract RefundProtocolTest is Test {
 
         vm.prank(user);
         refundProtocol.pay(receiver, 50, refundTo);
-        vm.startPrank(arbiter);
+        vm.prank(arbiter);
         refundProtocol.settleDebt(receiver);
 
         assertEq(usdc.balanceOf(address(refundProtocol)), 50);

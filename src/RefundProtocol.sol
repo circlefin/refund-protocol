@@ -64,6 +64,7 @@ contract RefundProtocol is EIP712 {
     error WithdrawalHashAlreadyUsed();
     error WithdrawalHashExpired();
     error PaymentRefunded(uint256 paymentID);
+    error LockupSecondsIsZero();
     error LockupSecondsExceedsMax();
     error MismatchedEarlyWithdrawalArrays();
 
@@ -102,6 +103,9 @@ contract RefundProtocol is EIP712 {
         }
 
         uint256 recipientlockupSeconds = lockupSeconds[to];
+        if (recipientlockupSeconds == 0) {
+            revert LockupSecondsIsZero();
+        }
 
         fiatToken.transferFrom(msg.sender, address(this), amount);
         payments[nonce] = Payment(to, amount, block.timestamp + recipientlockupSeconds, refundTo, 0, false);
@@ -171,6 +175,23 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
+     * Allows recipients to deposit funds to decrease their debt and increase their balance.
+     * @param amount amount to deposit
+     */
+    function depositRecipientFunds(uint256 amount) external {
+        fiatToken.transferFrom(msg.sender, address(this), amount);
+
+        uint256 debt = debts[msg.sender];
+
+        if (amount >= debt) {
+            debts[msg.sender] = 0;
+            balances[msg.sender] += amount - debt;
+        } else {
+            debts[msg.sender] -= amount;
+        }
+    }
+
+    /**
      * A function to add funds to the arbiter balance.
      * Funds will be drawn from the arbiter address and added to the arbiter balance.
      * @param amount amount to deposit
@@ -222,18 +243,21 @@ contract RefundProtocol is EIP712 {
         uint256 totalAmount = 0;
 
         for (uint256 i = 0; i < paymentIDs.length; ++i) {
-            Payment memory payment = payments[paymentIDs[i]];
+            uint256 paymentID = paymentIDs[i];
+
+            Payment memory payment = payments[paymentID];
+
             if (payment.to != msg.sender) {
                 revert CallerNotAllowed();
             }
             if (block.timestamp < payment.releaseTimestamp) {
-                revert PaymentIsStillLocked(paymentIDs[i]);
+                revert PaymentIsStillLocked(paymentID);
             }
             if (payment.refunded) {
-                revert PaymentRefunded(paymentIDs[i]);
+                revert PaymentRefunded(paymentID);
             }
             totalAmount += payment.amount - payment.withdrawnAmount;
-            payments[paymentIDs[i]].withdrawnAmount = payment.amount;
+            payments[paymentID].withdrawnAmount = payment.amount;
         }
         uint256 recipientBalance = balances[msg.sender];
         if (totalAmount > recipientBalance) {
@@ -295,7 +319,7 @@ contract RefundProtocol is EIP712 {
 
             Payment memory payment = payments[paymentID];
 
-            if (withdrawalAmount > payment.amount) {
+            if (withdrawalAmount > (payment.amount - payment.withdrawnAmount)) {
                 revert InvalidWithdrawalAmount(paymentID, withdrawalAmount);
             }
             if (payment.to != recipient) {
@@ -325,7 +349,7 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
-     * Allows the owner to authorize early withdrawals for a merchant
+     * Allows a user to change where a refund will be sent to
      * @param paymentID the payment ID to update
      * @param newRefundTo the address to which to update the refund address
      */
