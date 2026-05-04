@@ -26,7 +26,7 @@ permissions: read-all
 
 jobs:
   run_refund_tests_and_lint:
-    runs-on: ubuntu-latest
+    runs-on: github-hosted-small
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
