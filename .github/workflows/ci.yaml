@@ -27,16 +27,24 @@ permissions: read-all
 jobs:
   run_refund_tests_and_lint:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: block
+          policy: global-allowed-endpoints-policy
+
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
       - name: Update submodules
         run: git submodule update --init --recursive
         shell: bash
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@50d5a8956f2e319df19e6b57539d7e2acb9f8c1e # v1.5.0
         with:
           version: nightly
 
