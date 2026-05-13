@@ -372,6 +372,45 @@ contract RefundProtocolTest is Test {
         refundProtocol.earlyWithdrawByArbiter(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v, r, s);
     }
 
+    function testEarlyWithdrawByArbiterCannotOverWithdrawPaymentWithSharedRecipientBalance() public {
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.startPrank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+        refundProtocol.pay(receiver, 100, refundTo);
+        vm.stopPrank();
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+        uint256[] memory withdrawalAmounts = new uint256[](1);
+        withdrawalAmounts[0] = 60;
+        uint256 feeAmount = 0;
+
+        (uint8 v1, bytes32 r1, bytes32 s1) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiverPrivateKey);
+
+        vm.prank(arbiter);
+        refundProtocol.earlyWithdrawByArbiter(
+            paymentIDs, withdrawalAmounts, feeAmount, expiry, 0, receiver, v1, r1, s1
+        );
+
+        assertEq(refundProtocol.balances(receiver), 140);
+        assertEq(usdc.balanceOf(receiver), 60);
+
+        (uint8 v2, bytes32 r2, bytes32 s2) =
+            _generateEarlyWithdrawalSignature(paymentIDs, withdrawalAmounts, feeAmount, expiry, 1, receiverPrivateKey);
+
+        vm.prank(arbiter);
+        vm.expectRevert(abi.encodeWithSelector(RefundProtocol.InvalidWithdrawalAmount.selector, 0, 60));
+        refundProtocol.earlyWithdrawByArbiter(
+            paymentIDs, withdrawalAmounts, feeAmount, expiry, 1, receiver, v2, r2, s2
+        );
+
+        assertEq(refundProtocol.balances(receiver), 140);
+        assertEq(usdc.balanceOf(receiver), 60);
+    }
+
     function testEarlyWithdrawByArbiterInvalidFeeAmount() public {
         vm.prank(arbiter);
         refundProtocol.setLockupSeconds(receiver, 3600);
