@@ -122,6 +122,8 @@ contract RefundProtocol is EIP712 {
             revert CallerNotAllowed();
         }
 
+        _settleDebt(msg.sender);
+
         uint256 recipientBalance = balances[payment.to];
 
         if (payment.amount > recipientBalance) {
@@ -298,6 +300,9 @@ contract RefundProtocol is EIP712 {
             if (withdrawalAmount > payment.amount) {
                 revert InvalidWithdrawalAmount(paymentID, withdrawalAmount);
             }
+            if (payment.withdrawnAmount + withdrawalAmount > payment.amount) {
+                revert InvalidWithdrawalAmount(paymentID, withdrawalAmount);
+            }
             if (payment.to != recipient) {
                 revert PaymentDoesNotBelongToRecipient();
             }
@@ -368,9 +373,10 @@ contract RefundProtocol is EIP712 {
         if (payment.refunded) {
             revert PaymentRefunded(paymentID);
         }
-        fiatToken.transfer(payment.refundTo, payment.amount);
 
         payments[paymentID].refunded = true;
+
+        fiatToken.transfer(payment.refundTo, payment.amount);
 
         emit Refund(paymentID, payment.refundTo, payment.amount);
     }
