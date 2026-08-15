@@ -15,9 +15,15 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract RefundProtocol is EIP712 {
+contract RefundProtocol is EIP712, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using ECDSA for bytes32;
+
     struct Payment {
         address to;
         uint256 amount;
@@ -57,6 +63,8 @@ contract RefundProtocol is EIP712 {
     error PaymentIsStillLocked(uint256 paymentID);
     error PaymentDoesNotBelongToRecipient();
     error RefundToIsZeroAddress();
+    error RecipientIsZeroAddress();
+    error InvalidAmount();
     error InsufficientFunds();
     error InvalidWithdrawalAmount(uint256 paymentID, uint256 withdrawalAmount);
     error InvalidFeeAmount();
@@ -97,13 +105,19 @@ contract RefundProtocol is EIP712 {
      * @param refundTo - address to refund to if triggered
      */
     function pay(address to, uint256 amount, address refundTo) external {
+        if (to == address(0)) {
+            revert RecipientIsZeroAddress();
+        }
+        if (amount == 0) {
+            revert InvalidAmount();
+        }
         if (refundTo == address(0)) {
             revert RefundToIsZeroAddress();
         }
 
         uint256 recipientlockupSeconds = lockupSeconds[to];
 
-        fiatToken.transferFrom(msg.sender, address(this), amount);
+        fiatToken.safeTransferFrom(msg.sender, address(this), amount);
         payments[nonce] = Payment(to, amount, block.timestamp + recipientlockupSeconds, refundTo, 0, false);
         balances[to] += amount;
 
@@ -112,52 +126,59 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
-     * A function that returns a payment to the refundTo address to cover a refund or a chargeback.
-     * This function is callable only by the recipient of the payment, and can only be payed by the recipient.
+     * Returns a payment's un-withdrawn remainder to the refundTo address.
+     * Callable only by the recipient of the payment.
      * @param paymentID payment to refund
      */
-    function refundByRecipient(uint256 paymentID) external {
+    function refundByRecipient(uint256 paymentID) external nonReentrant {
         Payment memory payment = payments[paymentID];
         if (msg.sender != payment.to) {
             revert CallerNotAllowed();
         }
+        if (payment.refunded) {
+            revert PaymentRefunded(paymentID);
+        }
 
+        uint256 remaining = payment.amount - payment.withdrawnAmount;
         uint256 recipientBalance = balances[payment.to];
 
-        if (payment.amount > recipientBalance) {
+        if (remaining > recipientBalance) {
             revert InsufficientFunds();
         }
 
-        balances[payment.to] = recipientBalance - payment.amount;
+        balances[payment.to] = recipientBalance - remaining;
 
         _executeRefund(paymentID, payment);
     }
 
     /**
-     * A function that returns a payment to the refundTo address to cover a refund or a chargeback.
-     * It will first attempt to draw funds from the recipient's balance, and if that is insufficient,
-     * it will draw from the arbiter's balance.
-     * This function is callable only by the arbiter.
+     * Returns a payment's un-withdrawn remainder to the refundTo address.
+     * Draws from the recipient's balance; if insufficient, the arbiter fronts
+     * the remainder and the recipient's debt to the arbiter is recorded.
+     * Callable only by the arbiter.
      * @param paymentID payment to refund
      */
-    function refundByArbiter(uint256 paymentID) external onlyArbiter {
+    function refundByArbiter(uint256 paymentID) external onlyArbiter nonReentrant {
         Payment memory payment = payments[paymentID];
+        if (payment.refunded) {
+            revert PaymentRefunded(paymentID);
+        }
 
+        uint256 remaining = payment.amount - payment.withdrawnAmount;
         uint256 recipientBalance = balances[payment.to];
 
-        if (payment.amount <= recipientBalance) {
-            balances[payment.to] = recipientBalance - payment.amount;
+        if (remaining <= recipientBalance) {
+            balances[payment.to] = recipientBalance - remaining;
             return _executeRefund(paymentID, payment);
         }
 
         uint256 arbiterBalance = balances[arbiter];
-
-        if (payment.amount > arbiterBalance) {
+        if (remaining > arbiterBalance) {
             revert InsufficientFunds();
         }
 
-        balances[arbiter] = arbiterBalance - payment.amount;
-        debts[payment.to] += payment.amount;
+        balances[arbiter] = arbiterBalance - remaining;
+        debts[payment.to] += remaining;
 
         _executeRefund(paymentID, payment);
     }
@@ -172,27 +193,25 @@ contract RefundProtocol is EIP712 {
 
     /**
      * A function to add funds to the arbiter balance.
-     * Funds will be drawn from the arbiter address and added to the arbiter balance.
      * @param amount amount to deposit
      */
     function depositArbiterFunds(uint256 amount) external onlyArbiter {
-        fiatToken.transferFrom(msg.sender, address(this), amount);
+        fiatToken.safeTransferFrom(msg.sender, address(this), amount);
         balances[arbiter] += amount;
     }
 
     /**
-     * A function to withdraw arbiter funds
-     * Funds will be drawn from the arbiter balance and remitted to the arbiter address.
+     * A function to withdraw arbiter funds.
      * @param amount amount to withdraw
      */
-    function withdrawArbiterFunds(uint256 amount) external onlyArbiter {
+    function withdrawArbiterFunds(uint256 amount) external onlyArbiter nonReentrant {
         uint256 arbiterBalance = balances[arbiter];
         if (amount > arbiterBalance) {
             revert InsufficientFunds();
         }
 
         balances[arbiter] = arbiterBalance - amount;
-        fiatToken.transfer(arbiter, amount);
+        fiatToken.safeTransfer(arbiter, amount);
     }
 
     /**
@@ -210,13 +229,9 @@ contract RefundProtocol is EIP712 {
     /**
      * A permissionless function that allows users to withdraw their funds
      * after the lockup period has passed.
-     * It will fail if:
-     * 1. The caller is not the recipient of the payment
-     * 2. The payment is still locked
-     * 3. The payment has already been refunded
      * @param paymentIDs an array of payments to release
      */
-    function withdraw(uint256[] calldata paymentIDs) external {
+    function withdraw(uint256[] calldata paymentIDs) external nonReentrant {
         _settleDebt(msg.sender);
 
         uint256 totalAmount = 0;
@@ -240,15 +255,13 @@ contract RefundProtocol is EIP712 {
             revert InsufficientFunds();
         }
         balances[msg.sender] = recipientBalance - totalAmount;
-        fiatToken.transfer(msg.sender, totalAmount);
+        fiatToken.safeTransfer(msg.sender, totalAmount);
         emit Withdrawal(msg.sender, totalAmount);
     }
 
     /**
-     * Allows the arbiter to authorize early withdrawals for a recipient.
-     * There is an optional fee that can be charged for the early withdrawal.
-     * But the recipient must accept the terms of the early withdrawal
-     * by signing the hash of the withdrawal information.
+     * Allows the arbiter to authorize early withdrawals for a recipient,
+     * subject to the recipient's signed acceptance of the terms.
      * @param paymentIDs an array of payment IDS to release
      * @param withdrawalAmounts an array of withdrawal amounts
      * @param feeAmount an overall fee amount for the early withdrawal
@@ -269,25 +282,27 @@ contract RefundProtocol is EIP712 {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external onlyArbiter {
+    ) external onlyArbiter nonReentrant {
         bytes32 withdrawalInfoHash = _hashEarlyWithdrawalInfo(paymentIDs, withdrawalAmounts, feeAmount, expiry, salt);
 
         // prevent replay attacks
         if (withdrawalHashes[withdrawalInfoHash]) {
             revert WithdrawalHashAlreadyUsed();
         }
-        if (ecrecover(withdrawalInfoHash, v, r, s) != recipient) {
+        if (withdrawalInfoHash.recover(v, r, s) != recipient) {
             revert InvalidSignature();
         }
         if (block.timestamp > expiry) {
             revert WithdrawalHashExpired();
         }
-
-        uint256 totalAmount = 0;
-
         if (paymentIDs.length != withdrawalAmounts.length) {
             revert MismatchedEarlyWithdrawalArrays();
         }
+
+        // effect before interaction: consume the authorization up-front
+        withdrawalHashes[withdrawalInfoHash] = true;
+
+        uint256 totalAmount = 0;
 
         for (uint256 i = 0; i < paymentIDs.length; ++i) {
             uint256 paymentID = paymentIDs[i];
@@ -295,7 +310,8 @@ contract RefundProtocol is EIP712 {
 
             Payment memory payment = payments[paymentID];
 
-            if (withdrawalAmount > payment.amount) {
+            // cap on the REMAINING (un-withdrawn) amount, not the original amount
+            if (withdrawalAmount > payment.amount - payment.withdrawnAmount) {
                 revert InvalidWithdrawalAmount(paymentID, withdrawalAmount);
             }
             if (payment.to != recipient) {
@@ -317,15 +333,13 @@ contract RefundProtocol is EIP712 {
         balances[recipient] = recipientBalance - totalAmount;
         balances[arbiter] += feeAmount;
 
-        fiatToken.transfer(recipient, totalAmount - feeAmount);
-        emit Withdrawal(recipient, totalAmount);
-        emit WithdrawalFeePaid(recipient, feeAmount);
-
-        withdrawalHashes[withdrawalInfoHash] = true;
+        fiatToken.safeTransfer(recipient, totalAmount - feeAmount);
+        emit Withdrawal(recipient, totalAmount - feeAmount);
+        emit WithdrawalFeePaid(arbiter, feeAmount);
     }
 
     /**
-     * Allows the owner to authorize early withdrawals for a merchant
+     * Allows the current refundTo to update the refund address for a payment.
      * @param paymentID the payment ID to update
      * @param newRefundTo the address to which to update the refund address
      */
@@ -342,12 +356,7 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
-     * External function to hash early withdrawal information
-     * @param paymentIDs an array of payment IDS to release
-     * @param withdrawalAmounts an array of amounts to withdraw from those payment IDs
-     * @param feeAmount the fee amount for the early withdrawal
-     * @param expiry the expiration time for the early withdrawal
-     * @param salt a value to make the hash unique
+     * External function to hash early withdrawal information.
      */
     function hashEarlyWithdrawalInfo(
         uint256[] calldata paymentIDs,
@@ -360,23 +369,31 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
-     * Internal function to execute a refund
+     * Internal function to execute a refund of the payment's un-withdrawn remainder.
+     * Effects are applied before the external token transfer (checks-effects-interactions).
      * @param paymentID the payment ID to refund
-     * @param payment the payment struct
+     * @param payment the payment struct (memory copy read by the caller)
      */
     function _executeRefund(uint256 paymentID, Payment memory payment) internal {
         if (payment.refunded) {
             revert PaymentRefunded(paymentID);
         }
-        fiatToken.transfer(payment.refundTo, payment.amount);
 
+        uint256 remaining = payment.amount - payment.withdrawnAmount;
+
+        // effects first: consume the payment so it can never be withdrawn AND refunded
         payments[paymentID].refunded = true;
+        payments[paymentID].withdrawnAmount = payment.amount;
 
-        emit Refund(paymentID, payment.refundTo, payment.amount);
+        if (remaining > 0) {
+            fiatToken.safeTransfer(payment.refundTo, remaining);
+        }
+
+        emit Refund(paymentID, payment.refundTo, remaining);
     }
 
     /**
-     * Internal function to settle recipient debts
+     * Internal function to settle recipient debts.
      * @param recipient the recipient address
      */
     function _settleDebt(address recipient) internal {
@@ -391,12 +408,7 @@ contract RefundProtocol is EIP712 {
     }
 
     /**
-     * Internal function to hash early withdrawal information
-     * @param paymentIDs an array of payment IDS to release
-     * @param withdrawalAmounts an array of amounts to withdraw from those payment IDs
-     * @param feeAmount the fee amount for the early withdrawal
-     * @param expiry the expiration time for the early withdrawal
-     * @param salt a value to make the hash unique
+     * Internal function to hash early withdrawal information.
      */
     function _hashEarlyWithdrawalInfo(
         uint256[] calldata paymentIDs,
