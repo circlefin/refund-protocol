@@ -52,6 +52,11 @@ contract RefundProtocol is EIP712 {
     event RefundToUpdated(uint256 indexed paymentID, address indexed oldRefundTo, address indexed newRefundTo);
     event Withdrawal(address indexed to, uint256 amount);
     event WithdrawalFeePaid(address indexed recipient, uint256 amount);
+    event ArbiterFundsDeposited(address indexed arbiter, uint256 amount);
+    event ArbiterFundsWithdrawn(address indexed arbiter, uint256 amount);
+    event LockupSecondsUpdated(address indexed recipient, uint256 previousLockupSeconds, uint256 newLockupSeconds);
+    event DebtAccrued(address indexed recipient, address indexed arbiter, uint256 amount);
+    event DebtSettled(address indexed recipient, address indexed arbiter, uint256 amount);
 
     error CallerNotAllowed();
     error PaymentIsStillLocked(uint256 paymentID);
@@ -158,6 +163,7 @@ contract RefundProtocol is EIP712 {
 
         balances[arbiter] = arbiterBalance - payment.amount;
         debts[payment.to] += payment.amount;
+        emit DebtAccrued(payment.to, arbiter, payment.amount);
 
         _executeRefund(paymentID, payment);
     }
@@ -178,6 +184,7 @@ contract RefundProtocol is EIP712 {
     function depositArbiterFunds(uint256 amount) external onlyArbiter {
         fiatToken.transferFrom(msg.sender, address(this), amount);
         balances[arbiter] += amount;
+        emit ArbiterFundsDeposited(arbiter, amount);
     }
 
     /**
@@ -193,6 +200,7 @@ contract RefundProtocol is EIP712 {
 
         balances[arbiter] = arbiterBalance - amount;
         fiatToken.transfer(arbiter, amount);
+        emit ArbiterFundsWithdrawn(arbiter, amount);
     }
 
     /**
@@ -204,7 +212,9 @@ contract RefundProtocol is EIP712 {
         if (recipientLockupSeconds > MAX_LOCKUP_SECONDS) {
             revert LockupSecondsExceedsMax();
         }
+        uint256 previousLockupSeconds = lockupSeconds[recipient];
         lockupSeconds[recipient] = recipientLockupSeconds;
+        emit LockupSecondsUpdated(recipient, previousLockupSeconds, recipientLockupSeconds);
     }
 
     /**
@@ -388,6 +398,10 @@ contract RefundProtocol is EIP712 {
         balances[recipient] = recipientBalance - settleAmount;
         balances[arbiter] += settleAmount;
         debts[recipient] = recipientDebt - settleAmount;
+
+        if (settleAmount > 0) {
+            emit DebtSettled(recipient, arbiter, settleAmount);
+        }
     }
 
     /**
