@@ -682,6 +682,91 @@ contract RefundProtocolTest is Test {
         assertEq(refundProtocol.debts(receiver), 50);
     }
 
+    function testDepositArbiterFundsEmitsEvent() public {
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.ArbiterFundsDeposited(arbiter, 100);
+
+        vm.prank(arbiter);
+        refundProtocol.depositArbiterFunds(100);
+
+        assertEq(refundProtocol.balances(arbiter), 100);
+    }
+
+    function testWithdrawArbiterFundsEmitsEvent() public {
+        vm.prank(arbiter);
+        refundProtocol.depositArbiterFunds(100);
+
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.ArbiterFundsWithdrawn(arbiter, 40);
+
+        vm.prank(arbiter);
+        refundProtocol.withdrawArbiterFunds(40);
+
+        assertEq(refundProtocol.balances(arbiter), 60);
+    }
+
+    function testSetLockupSecondsEmitsEvent() public {
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.LockupSecondsUpdated(receiver, 0, 3600);
+
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 3600);
+
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.LockupSecondsUpdated(receiver, 3600, 7200);
+
+        vm.prank(arbiter);
+        refundProtocol.setLockupSeconds(receiver, 7200);
+    }
+
+    function testRefundByArbiterEmitsDebtAccrued() public {
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+
+        vm.prank(receiver);
+        refundProtocol.withdraw(paymentIDs);
+
+        vm.startPrank(arbiter);
+        refundProtocol.depositArbiterFunds(100);
+
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.DebtAccrued(receiver, arbiter, 100);
+        refundProtocol.refundByArbiter(0);
+        vm.stopPrank();
+
+        assertEq(refundProtocol.debts(receiver), 100);
+    }
+
+    function testSettleDebtEmitsEvent() public {
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        uint256[] memory paymentIDs = new uint256[](1);
+        paymentIDs[0] = 0;
+
+        vm.prank(receiver);
+        refundProtocol.withdraw(paymentIDs);
+
+        vm.startPrank(arbiter);
+        refundProtocol.depositArbiterFunds(100);
+        refundProtocol.refundByArbiter(0);
+        vm.stopPrank();
+
+        vm.prank(user);
+        refundProtocol.pay(receiver, 100, refundTo);
+
+        vm.expectEmit(true, true, true, true);
+        emit RefundProtocol.DebtSettled(receiver, arbiter, 100);
+
+        vm.prank(arbiter);
+        refundProtocol.settleDebt(receiver);
+
+        assertEq(refundProtocol.debts(receiver), 0);
+    }
+
     function _generateEarlyWithdrawalSignature(
         uint256[] memory paymentIDs,
         uint256[] memory withdrawalAmounts,
